@@ -26,3 +26,31 @@ params <- tibble(
 params
 
 
+fit_weibull_by_state <- function(state_data) {
+  unique_states <- unique(state_data$state)
+  
+  results <- lapply(unique_states, function(st) {
+    df_state <- state_data %>% filter(state == st)
+    
+    # Fit Weibull model for time spent in this state
+    # But this is not a competing risks model
+    fit <- tryCatch({
+      flexsurvreg(Surv(Tstart, Tstop, status) ~ 1,
+                  data = df_state, dist = "weibull")
+    }, error = function(e) NULL)
+    
+    if (!is.null(fit)) {
+      tibble(
+        state = st,
+        shape = fit$res["shape", "est"],
+        scale = fit$res["scale", "est"]
+      )
+    } else {
+      tibble(state = st, shape = NA_real_, scale = NA_real_)
+    }
+  })
+  
+  bind_rows(results)
+}
+
+xx <- fit_weibull_by_state(state_data = transitions_all)

@@ -1006,7 +1006,72 @@ patients_high_lots <- lung_ep_cleaned %>%
 lot_high <- lung_ep_cleaned %>%
   filter(patientid %in% patients_high_lots)
 
+collapse_recycled_lines <- function(data, n_back = 2, jaccard_threshold = 0.25, gap_days = 365) {
+ 
+  # Helper to split and clean drug names
+  split_drugs <- function(name) {
+    sort(trimws(unlist(strsplit(name, ",|\\+"))))
+  }
+  
+  # Jaccard similarity between two drug regimens
+  jaccard_similarity <- function(drugs1, drugs2) {
+    intersect_len <- length(intersect(drugs1, drugs2))
+    union_len <- length(union(drugs1, drugs2))
+    if (union_len == 0) return(0)
+    intersect_len / union_len
+  }
+  
+  data <- data %>%
+    arrange(patientid, linestartdate) %>%
+    group_by(patientid) %>%
+    mutate(
+      linename_vec = lapply(linename, split_drugs),
+      prev_lines = purrr::map2_lgl(
+        row_number(),
+        linename_vec,
+        function(i, current_drugs) {
+          if (i == 1) return(NA)
+          jaccard_list <- purrr::map2_lgl(
+            linename_vec[max(1, i - n_back):(i - 1)],
+            linestartdate[max(1, i - n_back):(i - 1)],
+            function(past_drugs, past_date) {
+              sim <- jaccard_similarity(current_drugs, past_drugs)
+              gap <- as.numeric(linestartdate[i] - past_date)
+              
+              # Print for debugging
+              cat("Line", i, "→ sim:", sim, "gap:", gap, "\n")
+              
+              sim >= jaccard_threshold & gap <= gap_days
+            }
+          )
+          any(jaccard_list)
+        }
+      ),
+      collapse = ifelse(is.na(prev_lines), FALSE, prev_lines)
+    ) %>%
+    mutate(
+      collapse_group = cumsum(!collapse | is.na(collapse))
+    ) %>%
+    group_by(patientid, collapse_group) %>%
+    summarise(
+      linestartdate = min(linestartdate),
+      lineenddate   = max(lineenddate),
+      linename      = paste(sort(unique(unlist(strsplit(paste(linename, collapse = ","), ",|\\+")))), collapse = " + "),
+      .groups = "drop"
+    ) %>%
+    arrange(patientid, linestartdate) %>%
+    group_by(patientid) %>%
+    mutate(linenumber = row_number()) %>%
+    ungroup()
+  
+  return(data)
+}
 
+lung_ep_collapsed <- collapse_recycled_lines(lung_ep_cleaned, n_back = 2, jaccard_threshold = 0.5, gap_days = 90)
+
+# Remove patients with more than 6 lines
+lung_ep_cleaned <- lung_ep_cleaned %>%
+  filter(!(patientid %in% patients_high_lots))
 ###############################################################################
 # Off-treatment threshold 
 gap_threshold <- 7
@@ -1115,11 +1180,23 @@ state_map <- tibble(state = state_levels, state_id = seq_along(state_levels))
 allowed_transitions <- tribble(
   ~from, ~to,
   1,     2,
+  1,     3,
   1,     4,
+  1,     5,
+  1,     6,
   2,     3,
   2,     4,
+  2,     5,
+  2,     6,
   3,     2,
-  3,     4
+  3,     4,
+  3,     5,
+  3,     6,
+  4,     2,
+  4,     5,
+  4,     6,
+  5,     2,
+  5,     6
 )
 
 # Observed transitions 
@@ -1164,31 +1241,49 @@ transitions_all <- transitions_all %>%
   filter(Tstop > Tstart)
 
 # Fit model 
-crwei <- flexsurvreg(Surv(Tstart, Tstop, status) ~ trans + shape(trans), data = transitions_all, dist = "weibull")
+crwei <- flexsurvreg(Surv(Tstart, Tstop, status) ~ trans + shape(factor(trans)), data = transitions_all, dist = "weibull")
 
-# Number of transitions in your data
-transitions <- sort(unique(transitions_all$trans))  # e.g., 1 to 6
-n_trans <- length(transitions)
+# Get actual transition values used
+trans_ids <- sort(unique(transitions_all$trans))
 
+# Base estimates (for the reference transition — usually lowest trans ID)
+base_shape <- crwei$res["shape", "est"]
+base_scale <- crwei$res["scale", "est"]
 
-# Get baseline estimates (for trans = 1)
-base_shape  <- crwei$res["shape","est"]
-base_scale  <- crwei$res["scale","est"]
+# Initialize offsets
+logscale_offset <- numeric(length(trans_ids))
+logshape_offset <- numeric(length(trans_ids))
 
-# Get coefficients for additional transitions (trans = 2, 3, ..., n)
-trans_coef  <- crwei$res[grep("^trans", rownames(crwei$res)), "est"]
-shape_coef  <- crwei$res[grep("^shape\\(trans\\)", rownames(crwei$res)), "est"]
+# Loop through each transition ID
+for (j in seq_along(trans_ids)) {
+  t <- trans_ids[j]
+  
+  if (t == min(trans_ids)) {
+    logscale_offset[j] <- 0
+    logshape_offset[j] <- 0
+  } else {
+    scale_name <- paste0("trans", t)
+    shape_name <- paste0("shape(trans", t, ")")
+    
+    if (scale_name %in% rownames(crwei$res)) {
+      logscale_offset[j] <- crwei$res[scale_name, "est"]
+    }
+    
+    if (shape_name %in% rownames(crwei$res)) {
+      logshape_offset[j] <- crwei$res[shape_name, "est"]
+    }
+  }
+}
 
-# Combine into a data frame
-params <- tibble(
-  trans = 1:n_trans,
-  logscale_offset = c(0, trans_coef),         # 0 offset for baseline
-  logshape_offset = c(0, shape_coef),         # 0 offset for baseline
-  scale = exp(log(base_scale) + logscale_offset),
-  shape = exp(log(base_shape) + logshape_offset)
+# Combine into parameter table
+params <- tibble::tibble(
+  trans = trans_ids,
+  shape = exp(log(base_shape) + logshape_offset),
+  scale = exp(log(base_scale) + logscale_offset)
 )
 
-params
-
-
-
+# 
+fit_line3 <- flexsurvreg(Surv(start_time, end_time, event) ~ 1,
+                         data = state_durations,
+                         dist = "weibull",
+                         subset = state == "On_Treatment_Line2")

@@ -22,21 +22,21 @@
 #'
 #' @examples
 #' 
-#' allowed_transitions <- tibble::tribble(
-#'   ~from, ~to,
-#'   1,     2,
-#'   1,     4,
-#'   2,     3,
-#'   2,     4,
-#'   3,     2,
-#'   3,     4
-#' )
 #' transitions_all <- generate_transition_data(state_durations, allowed_transitions)
-generate_transition_data <- function(state_durations, allowed_transitions) {
+generate_transition_data <- function(state_durations) {
  
   # Map states to numbers
   state_levels <- unique(state_durations$state)
   state_map <- tibble::tibble(state = state_levels, state_id = seq_along(state_levels))
+  
+  allowed_transitions <- tibble::tribble(
+       ~from, ~to,
+       1,     2,
+       1,     4,
+       2,     3,
+       2,     4,
+      3,     2,
+       3,     4)
   
   # Observed transitions
   obs_transitions <- state_durations %>%

@@ -35,7 +35,7 @@ fit_weibull_by_state <- function(state_data) {
     # Fit Weibull model for time spent in this state
     # But this is not a competing risks model
     fit <- tryCatch({
-      flexsurvreg(Surv(Tstart, Tstop, status) ~ 1,
+      flexsurvreg(Surv(start_time, end_time, event) ~ 1,
                   data = df_state, dist = "weibull")
     }, error = function(e) NULL)
     
@@ -53,4 +53,3 @@ fit_weibull_by_state <- function(state_data) {
   bind_rows(results)
 }
 
-xx <- fit_weibull_by_state(state_data = transitions_all)

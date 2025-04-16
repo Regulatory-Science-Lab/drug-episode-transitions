@@ -254,17 +254,18 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
                                     off_treatment_threshold = 7, ...) {
   
   drug_episodes <- drug_episode_data %>%
-    dplyr::select(patientid, linenumber, linename, linestartdate, lineenddate, episodedate, detaileddrugcategory) %>%
+    dplyr::select(patientid, linenumber, linename, linesetting, 
+                  linestartdate, lineenddate, episodedate, detaileddrugcategory) %>%
+    dplyr::filter(linesetting == "ADVANCED") %>%
     tidyr::drop_na(linenumber) %>%
     dplyr::group_by(patientid, linenumber) %>%
     dplyr::summarise(
       linename = dplyr::first(linename),
       linestartdate = min(linestartdate),
       lineenddate = max(episodedate),
-      .groups = "drop"
+      .groups = 'drop'
     ) %>%
     dplyr::distinct() %>%
-    dplyr::left_join(last_contact_data, by = "patientid") %>%
     dplyr::arrange(patientid, linenumber) %>%
     dplyr::mutate(
       linestartdate = lubridate::ymd(linestartdate),
@@ -281,35 +282,34 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
     dplyr::pull(patientid) %>%
     unique()
   
+  # We are only interested in patients with target line number and the line after (all possible transitions from target line)
   drug_episodes <- drug_episodes %>%
     dplyr::filter(patientid %in% ep_patients) %>%
-    dplyr::filter(linenumber != 1)
+    dplyr::filter(linenumber == line_placement | linenumber == line_placement + 1)
   
-  # TEMP: Filter out patients with >5 lines
-  patients_high_lots <- drug_episodes %>%
-    dplyr::filter(linenumber > 5) %>%
-    dplyr::pull(patientid) %>%
-    unique()
-  
+  # Join last contact data
   drug_episodes <- drug_episodes %>%
-    dplyr::filter(patientid %in% patients_high_lots)
-  
-  # STEP 1: Prepare for state transitions
+    dplyr::left_join(last_contact_data, by = "patientid")
+ 
+  #  Prepare for state transitions
   lines <- drug_episodes %>%
-    dplyr::arrange(patientid, linestartdate) %>%
-    dplyr::filter(linenumber >= 1) %>%
     dplyr::group_by(patientid) %>%
     dplyr::mutate(
       next_start = dplyr::lead(linestartdate),
-      gap_days = as.numeric(difftime(next_start, lineenddate, units = "days")),
+      gap_days = as.numeric(next_start - lineenddate),
       has_gap = gap_days >= off_treatment_threshold,
+      adjust_line_start = gap_days < off_treatment_threshold & !is.na(gap_days),
+      linestartdate = dplyr::if_else(
+        dplyr::lag(adjust_line_start, default = FALSE),
+        dplyr::lag(lineenddate) + 1,
+        linestartdate
+      ),
       base_time = dplyr::first(linestartdate)
     ) %>%
     dplyr::ungroup()
   
-  # STEP 2: On-treatment states
+  # On-treatment states
   on_treatment <- lines %>%
-    dplyr::filter(linenumber >= 2) %>%
     dplyr::mutate(
       state = paste0("On_Treatment_Line", linenumber)
     ) %>%
@@ -319,33 +319,39 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
       state,
       start_date = linestartdate,
       end_date = lineenddate,
+      linenumber, 
       base_time, 
+      death_date, 
       event = 1
     )
   
-  # STEP 3: Off-treatment periods between lines
+  # Off-treatment periods between lines only for the target line placement of interest (for patients who have a line next)
   off_treatment <- lines %>%
-    dplyr::filter(has_gap) %>%
+    tidyr::drop_na(has_gap) %>%
+    dplyr::filter(has_gap, linenumber == line_placement) %>%
     dplyr::transmute(
       patientid,
-      state = "Off_Treatment",
-      start_date = lineenddate,
-      end_date = next_start,
+      state = paste0("Off_Treatment", line_placement),
+      start_date = lineenddate + 1,
+      end_date = next_start-1,
       base_time, 
+      linenumber, 
+      death_date,
       event = 1
     )
   
-  # STEP 4: Final state (off-treatment or death)
+  # Off-treatment (for patients who transition to death from target line)
   final <- lines %>%
     dplyr::group_by(patientid) %>%
+    dplyr::filter(max(linenumber) == line_placement) %>%
     dplyr::slice_max(linestartdate, with_ties = FALSE) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(
       final_end = dplyr::coalesce(death_date, Date_LastFollowUp),
       died = !is.na(death_date),
       state = dplyr::case_when(
-        died ~ "Off_Treatment",
-        lineenddate < final_end ~ "Off_Treatment",
+        died ~ paste0("Off_Treatment", line_placement),
+        lineenddate < final_end ~ paste0("Off_Treatment", line_placement),
         TRUE ~ paste0("On_Treatment_Line", linenumber)
       ),
       event = as.integer(died)
@@ -361,9 +367,9 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
     ) %>%
     dplyr::filter(!is.na(end_date) & end_date > start_date)
   
-  # STEP 5: Add absorbing state for death
+  # Add absorbing state for death
   death_state <- final %>%
-    dplyr::filter(state == "Off_Treatment", !is.na(end_date), end_date == death_date) %>%
+    dplyr::filter(state == paste0("Off_Treatment", line_placement), !is.na(end_date), end_date == death_date) %>%
     dplyr::transmute(
       patientid,
       state = "Death",
@@ -373,9 +379,10 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
       event = 1
     )
   
-  # STEP 6: Combine states and compute time variables
+  
+  # Combine states and compute time variables
   state_durations <- dplyr::bind_rows(
-    on_treatment,
+    on_treatment, 
     off_treatment,
     final,
     death_state
@@ -387,6 +394,8 @@ construct_drug_episodes <- function(drug_episode_data, last_contact_data,
     ) %>%
     dplyr::select(patientid, state, start_time, end_time, duration, event) %>%
     dplyr::arrange(patientid, start_time)
+  
+  
   
   return(state_durations)
 }

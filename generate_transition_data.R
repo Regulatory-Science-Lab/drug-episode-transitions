@@ -76,3 +76,71 @@ generate_transition_data <- function(state_durations) {
   
   return(transitions_all)
 }
+
+
+
+#' Fit Weibull Survival Models for Each State for sojourn survival time 
+#'
+#' This function fits separate Weibull models for each unique state in a state duration dataset.
+#' It estimates the shape and scale parameters along with their 95% confidence intervals
+#' using the `flexsurvreg` function from the `flexsurv` package.
+#'
+#' @param transitions_all A data frame with columns: `state`, `T_start`, `T_stop`, `status`.
+#'        Each row represents time spent in a state for a given patient, where:
+#'        - `T_start` is the entry time into the state (usually 0)
+#'        - `T_stop` is the exit time
+#'        - `status` is 1 if the patient exited (event), 0 if censored
+#'
+#' @return A tibble with columns:
+#'   - `state`: state name
+#'   - `shape`, `scale`: Weibull parameter estimates
+#'   - `shape_lci`, `shape_uci`: 95% CI for shape
+#'   - `scale_lci`, `scale_uci`: 95% CI for scale
+#'
+#' @examples
+#' fit_weibull_by_state(transitions_all)
+#'
+#' @importFrom dplyr filter bind_rows
+#' @importFrom flexsurv flexsurvreg
+#' @importFrom tibble tibble
+#' @export
+fit_weibull_by_state <- function(transitions_all) {
+  unique_transitions <- unique(transitions_all$trans)
+  
+  param_results <- lapply(unique_transitions, function(t) {
+    df_state <- transitions_all %>% dplyr::filter(trans == t)
+    
+    # Fit Weibull model
+    fit <- tryCatch({
+      flexsurv::flexsurvreg(
+        Surv(T_start, T_stop, status) ~ 1,
+        data = transitions_all,
+        dist = "weibull"
+      )
+    }, error = function(e) NULL)
+    
+    if (!is.null(fit)) {
+      tibble::tibble(
+        state = st,
+        shape = fit$res["shape", "est"],
+        shape_lci = fit$res["shape", "lcl"],
+        shape_uci = fit$res["shape", "ucl"],
+        scale = fit$res["scale", "est"],
+        scale_lci = fit$res["scale", "lcl"],
+        scale_uci = fit$res["scale", "ucl"]
+      )
+    } else {
+      tibble::tibble(
+        state = st,
+        shape = NA_real_,
+        shape_lci = NA_real_,
+        shape_uci = NA_real_,
+        scale = NA_real_,
+        scale_lci = NA_real_,
+        scale_uci = NA_real_
+      )
+    }
+  })
+  
+  dplyr::bind_rows(param_results)
+}

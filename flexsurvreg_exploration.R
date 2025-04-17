@@ -26,11 +26,11 @@ params <- tibble(
 params
 
 
-fit_weibull_by_state <- function(state_data) {
+fit_weibull_by_state <- function(transitions_all) {
   unique_states <- unique(state_data$state)
   
   results <- lapply(unique_states, function(st) {
-    df_state <- state_data %>% filter(state == st)
+    df_state <- transitions_all %>% filter(trans == st)
     
     # Fit Weibull model for time spent in this state
     # But this is not a competing risks model

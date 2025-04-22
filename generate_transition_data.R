@@ -113,25 +113,25 @@ fit_weibull_by_state <- function(transitions_all) {
     # Fit Weibull model
     fit <- tryCatch({
       flexsurv::flexsurvreg(
-        Surv(T_start, T_stop, status) ~ 1,
-        data = transitions_all,
+        Surv(Tstart, Tstop, status) ~ 1,
+        data = df_state,
         dist = "weibull"
       )
     }, error = function(e) NULL)
     
     if (!is.null(fit)) {
       tibble::tibble(
-        state = st,
+        state = t,
         shape = fit$res["shape", "est"],
-        shape_lci = fit$res["shape", "lcl"],
-        shape_uci = fit$res["shape", "ucl"],
+        shape_lci = fit$res["shape", "L95%"],
+        shape_uci = fit$res["shape", "U95%"],
         scale = fit$res["scale", "est"],
-        scale_lci = fit$res["scale", "lcl"],
-        scale_uci = fit$res["scale", "ucl"]
+        scale_lci = fit$res["scale", "L95%"],
+        scale_uci = fit$res["scale", "U95%"]
       )
     } else {
       tibble::tibble(
-        state = st,
+        state_transition = t,
         shape = NA_real_,
         shape_lci = NA_real_,
         shape_uci = NA_real_,

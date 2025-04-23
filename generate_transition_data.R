@@ -1,28 +1,23 @@
-#' Generate transition dataset for multi-state modeling
+#' Generate transition data for multi-state modeling
 #'
-#' This function prepares a dataset of observed and possible transitions
-#' between states for use in flexible multi-state survival models like
-#' those fit with `flexsurvreg`. It computes transition intervals
-#' (Tstart, Tstop), assigns transition IDs, and fills in censored transitions.
+#' This function prepares patient-level transition data for multi-state survival models,
+#' computing observed and possible transitions, and aggregating time spent in each state.
+#' It also returns the empirical frequency of observed transitions.
 #'
 #' @param state_durations A data frame with one row per patient per state, including:
-#'   - `patientid`: patient identifier
-#'   - `state`: state label
-#'   - `start_time`: numeric time the state begins
-#'   - `end_time`: numeric time the state ends
-#'   - `event`: 1 if transition was observed, 0 if censored
+#'   - `patientid`: unique patient ID
+#'   - `state`: character name of the state
+#'   - `start_time`: time of entry into the state (numeric)
+#'   - `end_time`: time of exit from the state (numeric)
+#'   - `event`: 1 if transition was observed (not censored), 0 otherwise
 #'
-#' @param allowed_transitions A data frame (or tibble) with columns:
-#'   - `from`: numeric state ID
-#'   - `to`: numeric state ID
-#' which details all possible transitions 
-#' 
-#' @return A tibble with one row per possible transition interval per patient:
-#'   - `patientid`, `from`, `to`, `Tstart`, `Tstop`, `status`, `trans`
+#' @return A list containing:
+#'   - `transitions_combined`: aggregated durations per patient per state
+#'   - `edf`: empirical transition frequencies (from → to)
 #'
 #' @examples
-#' 
-#' transitions_all <- generate_transition_data(state_durations, allowed_transitions)
+#' transitions <- generate_transition_data(state_durations)
+#'
 generate_transition_data <- function(state_durations) {
  
   # Map states to numbers
@@ -57,9 +52,9 @@ generate_transition_data <- function(state_durations) {
   expand_possible <- obs_transitions %>%
     dplyr::select(patientid, from, Tstart, Tstop) %>%
     dplyr::distinct() %>%
-    dplyr::inner_join(allowed_transitions, by = "from")
+    dplyr::inner_join(allowed_transitions, by = "from", relationship = "many-to-many")
   
-  # Step 4: Merge observed transitions with all possible ones
+  # Merge observed transitions with all possible ones
   transitions_all <- expand_possible %>%
     dplyr::left_join(obs_transitions %>% 
                 dplyr::select(patientid, from, to, Tstart, Tstop, status_obs = status),
@@ -74,7 +69,37 @@ generate_transition_data <- function(state_durations) {
       trans = match(paste(from, to), paste(allowed_transitions$from, allowed_transitions$to))
     )
   
-  return(transitions_all)
+  # Combine on and off-treatment transitions 
+  transitions_combined <- transitions_all %>%
+    dplyr::left_join(state_map, by = c("from" = "state_id")) %>%
+    dplyr::rename(from_state = state) %>%
+    dplyr::left_join(state_map, by = c("to" = "state_id")) %>%
+    dplyr::rename(to_state = state) %>%
+    dplyr::select(-from, -to, -to_state) %>% 
+    dplyr::group_by(patientid, from_state) %>%
+    dplyr::summarise(
+      Tstart = min(Tstart),
+      Tstop = max(Tstop),
+      status = as.integer(any(status == 1)),
+      .groups = "drop"
+    )
+    
+  
+  # Create empirical distribution (frequency)
+  transitions_frequency <- transitions_all %>%
+    dplyr::filter(status == 1) %>%
+    dplyr::count(from, to) %>%
+    dplyr::left_join(state_map, by = c("from" = "state_id")) %>%
+    dplyr::rename(from_state = state) %>%
+    dplyr::left_join(state_map, by = c("to" = "state_id")) %>%
+    dplyr::rename(to_state = state) %>%
+    dplyr::select(from_state, to_state, n) %>%
+    dplyr::mutate(prob = n / sum(n)) %>%
+    dplyr::ungroup()
+    
+
+  
+  return(list(transitions_combined = transitions_combined, edf = transitions_frequency))
 }
 
 
@@ -85,11 +110,11 @@ generate_transition_data <- function(state_durations) {
 #' It estimates the shape and scale parameters along with their 95% confidence intervals
 #' using the `flexsurvreg` function from the `flexsurv` package.
 #'
-#' @param transitions_all A data frame with columns: `state`, `T_start`, `T_stop`, `status`.
+#' @param transitions_combined A data frame with columns: `from_state`, `Tstart`, `Tstop`, `status`.
 #'        Each row represents time spent in a state for a given patient, where:
-#'        - `T_start` is the entry time into the state (usually 0)
-#'        - `T_stop` is the exit time
-#'        - `status` is 1 if the patient exited (event), 0 if censored
+#'        - `Tstart` is the entry time into the state (usually 0)
+#'        - `Tstop` is the exit time
+#'        - `status` is 1 if the patient exited the state for any event, 0 if censored (no exit from the state)
 #'
 #' @return A tibble with columns:
 #'   - `state`: state name
@@ -104,24 +129,49 @@ generate_transition_data <- function(state_durations) {
 #' @importFrom flexsurv flexsurvreg
 #' @importFrom tibble tibble
 #' @export
-fit_weibull_by_state <- function(transitions_all) {
-  unique_transitions <- unique(transitions_all$trans)
+fit_weibull_by_state <- function(transitions_combined) {
+  unique_transitions <- unique(transitions_combined$from_state)
   
   param_results <- lapply(unique_transitions, function(t) {
-    df_state <- transitions_all %>% dplyr::filter(trans == t)
+    df_state <- transitions_combined %>% dplyr::filter(from_state == t)
+    n_events <- sum(df_state$status == 1, na.rm = TRUE)
     
+    # Handle no events
+    if (n_events == 0) {
+      message(glue::glue("No observed events for transition {t} Returning NA"))
+      return(tibble::tibble(
+        state_transition = t,
+        shape = NA_real_, shape_lci = NA_real_, shape_uci = NA_real_,
+        scale = NA_real_, scale_lci = NA_real_, scale_uci = NA_real_
+      ))
+    }
     # Fit Weibull model
     fit <- tryCatch({
       flexsurv::flexsurvreg(
         Surv(Tstart, Tstop, status) ~ 1,
         data = df_state,
-        dist = "weibull"
-      )
-    }, error = function(e) NULL)
+        dist = "weibull")
+    }, 
+    error = function(e) NULL)
+    
+    # If failed, try fallback inits
+    if (is.null(fit)) {
+      median_surv <- median(df_state$Tstop - df_state$Tstart, na.rm = TRUE)
+      message(glue::glue("Default fit optimizer failed for {t} Retrying with inits: shape = 1, scale = {median_surv}"))
+      
+      fit <- tryCatch({
+        flexsurv::flexsurvreg(
+          Surv(Tstart, Tstop, status) ~ 1,
+          data = df_state,
+          dist = "weibull",
+          inits = c(shape = 1, scale = median_surv)
+        )
+      }, error = function(e) NULL)
+    }
     
     if (!is.null(fit)) {
       tibble::tibble(
-        state = t,
+        state_transition = t,
         shape = fit$res["shape", "est"],
         shape_lci = fit$res["shape", "L95%"],
         shape_uci = fit$res["shape", "U95%"],
@@ -130,17 +180,14 @@ fit_weibull_by_state <- function(transitions_all) {
         scale_uci = fit$res["scale", "U95%"]
       )
     } else {
+      message(glue::glue("Weibull model failed for {t} Returning NA."))
       tibble::tibble(
         state_transition = t,
-        shape = NA_real_,
-        shape_lci = NA_real_,
-        shape_uci = NA_real_,
-        scale = NA_real_,
-        scale_lci = NA_real_,
-        scale_uci = NA_real_
+        shape = NA_real_, shape_lci = NA_real_, shape_uci = NA_real_,
+        scale = NA_real_, scale_lci = NA_real_, scale_uci = NA_real_
       )
     }
   })
-  
-  dplyr::bind_rows(param_results)
+  params_results <- dplyr::bind_rows(param_results)
+  return(params_results)
 }

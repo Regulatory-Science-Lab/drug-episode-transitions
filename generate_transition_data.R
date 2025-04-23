@@ -94,6 +94,7 @@ generate_transition_data <- function(state_durations) {
     dplyr::left_join(state_map, by = c("to" = "state_id")) %>%
     dplyr::rename(to_state = state) %>%
     dplyr::select(from_state, to_state, n) %>%
+    dplyr::group_by(from_state) %>%
     dplyr::mutate(prob = n / sum(n)) %>%
     dplyr::ungroup()
     

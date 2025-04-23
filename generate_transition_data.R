@@ -188,6 +188,11 @@ fit_weibull_by_state <- function(transitions_combined) {
       )
     }
   })
+  
   params_results <- dplyr::bind_rows(param_results)
+ params_results <- params_results %>%
+    mutate(on_treatment_flag = str_detect(state_transition, "^On_Treatment")) %>%
+    arrange(desc(on_treatment_flag), state_transition) %>%
+    select(-on_treatment_flag)
   return(params_results)
 }

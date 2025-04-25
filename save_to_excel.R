@@ -96,3 +96,25 @@ workbook <- write_shape_scale(wb = wb, params_results = params_results, tumour =
 # Sve workbook 
 openxlsx::saveWorkbook(workbook, glue("H://PACER//PREDiCT//PREDiCT_e//CEA//Model inputs examples//01_public_parameters_updated_NTLB2.xlsx"), overwrite = TRUE)
 
+#################################### LOOPED RUN ###############################################################
+param_list <- tibbe::tibble(
+  tumour = c("lung", "breast"),
+  treatment = c("cisplatin", "levo"),
+  # Ordered list of dataframes of the output of `fit_weibull_by_state` for each tumour type
+  params_results = list(params_lung, params_breast))
+  
+# Load workbook (change name)
+wb <- openxlsx::loadWorkbook(glue("H://PACER//PREDiCT//PREDiCT_e//CEA//Model inputs examples//01_public_parameters_updated_NTLB2.xlsx"))
+  
+# Loop over rows of the param_list
+  for (i in seq_len(nrow(param_list))) {
+    wb <- write_shape_scale(
+      wb = wb,
+      params_results = param_list$params_results[[i]],  #
+      tumour = param_list$tumour[i],
+      treatment = param_list$treatment[i]
+    )
+  }
+  
+  # Save workbook once
+openxlsx::saveWorkbook(workbook, glue("H://PACER//PREDiCT//PREDiCT_e//CEA//Model inputs examples//01_public_parameters_updated_NTLB2.xlsx"), overwrite = TRUE)

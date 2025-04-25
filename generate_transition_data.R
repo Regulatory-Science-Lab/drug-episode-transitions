@@ -44,9 +44,32 @@ generate_transition_data <- function(state_durations) {
       Tstart = lag(start_time),
       Tstop = start_time
     ) %>%
-    dplyr::ungroup() %>%
     dplyr::filter(!is.na(from)) %>%
-    dplyr::mutate(status = event)
+    dplyr::ungroup() %>% 
+    dplyr::mutate(
+      status = event
+    )
+  
+  # Add single censored transitions to observed transitions
+  single_transitions <- state_durations %>%
+    dplyr::left_join(state_map, by = "state") %>%
+    dplyr::group_by(patientid) %>%
+    dplyr::filter(n() == 1) %>%
+    dplyr::mutate(
+      from = state_id,
+      to = state_id,
+      Tstart = start_time,
+      Tstop = end_time
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      status = 0,
+      event = 0
+    )
+  
+  # Bind to observed transitions
+  obs_transitions <- obs_transitions %>%
+    dplyr::bind_rows(single_transitions)
   
   # All possible transitions for observed intervals
   expand_possible <- obs_transitions %>%

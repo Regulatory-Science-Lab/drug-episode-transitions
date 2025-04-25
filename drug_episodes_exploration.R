@@ -1287,3 +1287,11 @@ fit_line3 <- flexsurvreg(Surv(start_time, end_time, event) ~ 1,
                          data = state_durations,
                          dist = "weibull",
                          subset = state == "On_Treatment_Line2")
+
+####################### Looking at progression data ##############################
+prog_data <- prog_data %>%
+  select(patientid, progressiondate)
+
+# Join 
+state_prog <- state_durations %>%
+  left_join(prog_data)
